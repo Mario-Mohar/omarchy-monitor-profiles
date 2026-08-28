@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""Named monitor arrangements for Hyprland, switchable from the Omarchy bar.
+
+The profiles live in ~/.config/omarchy/monitor-profiles/profiles.json. Applying
+one only writes `active` and asks Hyprland to reload -- the arrangement itself
+is emitted by lua/profiles.lua, which the user's monitors.lua loads. That way
+the Hyprland config stays the single source of truth for what is on screen, and
+a profile survives a reload, a relogin and a reboot.
+
+Standard library only, so the widget has nothing to install.
+"""
+
+import argparse
+import errno
+import fcntl
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from glob import glob
+
+CONFIG_DIR = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+    "omarchy", "monitor-profiles")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "profiles.json")
+BACKUP_DIR = os.path.join(CONFIG_DIR, "backups")
+
+# Which profile the running Hyprland actually has applied, plus the lock and
+# trace that go with `sync`. Runtime state, not config: it must not survive a
+# reboot, because after one nothing is applied yet.
+RUNTIME_DIR = os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), "monitor-profiles")
+APPLIED_PATH = os.path.join(RUNTIME_DIR, "applied")
+LOCK_PATH = os.path.join(RUNTIME_DIR, "sync.lock")
+TRACE_PATH = os.path.join(RUNTIME_DIR, "sync.log")
+
+AUTO = "auto"
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+# Connector names as the kernel and Hyprland both spell them: eDP-1, DP-4,
+# HDMI-A-1. Anything else is not a monitor we can act on.
+OUTPUT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,31}$")
+
+MAX_PROFILES = 12
+MAX_MONITORS = 16
+MAX_NAME = 40
+
+# Three slots, deliberately empty: the point of the widget is that you arrange
+# the screens however you like and press "Capture current". Names are a starting
+# suggestion, not a promise about anyone's desk.
+DEFAULT_PROFILES = [
+    {"id": "desk", "name": "Desk", "icon": "\U000f037a", "match": [], "monitors": []},
+    {"id": "mobile", "name": "Mobile", "icon": "\U000f0322", "match": [], "monitors": []},
+    {"id": "present", "name": "Presentation", "icon": "\U000f0379", "match": [], "monitors": []},
+]
+
+
+# --------------------------------------------------------------- reading state
+
+def connected_outputs():
+    """Outputs the kernel reports as plugged in, straight from sysfs.
+
+    Deliberately not hyprctl: `emit` runs while Hyprland is parsing its config,
+    and asking the compositor a question from inside its own config parse is how
+    you get a deadlock instead of a monitor layout.
+    """
+    found = set()
+    for path in glob("/sys/class/drm/card*-*/status"):
+        try:
+            with open(path, "r") as handle:
+                if handle.readline().strip() != "connected":
+                    continue
+        except OSError:
+            continue
+        # /sys/class/drm/card1-DP-2/status -> DP-2
+        name = os.path.basename(os.path.dirname(path)).split("-", 1)[-1]
+        if OUTPUT_RE.match(name):
+            found.add(name)
+    return sorted(found)
+
+
+def hypr_monitors():
+    """Current arrangement according to the running compositor, or None."""
+    if not shutil.which("hyprctl"):
+        return None
+    try:
+        out = subprocess.run(["hyprctl", "monitors", "all", "-j"],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        data = json.loads(out.stdout)
+    except ValueError:
+        return None
+    return data if isinstance(data, list) else None
+
+
+# --------------------------------------------------------------- config on disk
+
+def blank_config():
+    return {"version": 1, "active": AUTO, "hotplug": True,
+            "profiles": [dict(p, match=list(p["match"]), monitors=list(p["monitors"]))
+                         for p in DEFAULT_PROFILES]}
+
+
+def sanitize(raw):
+    """Turn whatever is on disk into a config we can act on, never raising.
+
+    A hand-edited file is the normal case here, so every field is treated as
+    untrusted: bad entries are dropped rather than allowed to reach Hyprland.
+    """
+    config = blank_config()
+    if not isinstance(raw, dict):
+        return config
+
+    profiles = []
+    seen = set()
+    for entry in (raw.get("profiles") or [])[:MAX_PROFILES]:
+        if not isinstance(entry, dict):
+            continue
+        pid = str(entry.get("id", "")).strip()
+        if not ID_RE.match(pid) or pid in seen or pid == AUTO:
+            continue
+        seen.add(pid)
+        profiles.append({
+            "id": pid,
+            "name": (str(entry.get("name") or pid).strip() or pid)[:MAX_NAME],
+            "icon": str(entry.get("icon") or "")[:8],
+            "match": [o for o in (entry.get("match") or [])
+                      if isinstance(o, str) and OUTPUT_RE.match(o)][:MAX_MONITORS],
+            "monitors": sanitize_monitors(entry.get("monitors")),
+        })
+
+    if profiles:
+        config["profiles"] = profiles
+
+    active = str(raw.get("active") or AUTO).strip()
+    config["active"] = active if active == AUTO or active in seen else AUTO
+    config["hotplug"] = raw.get("hotplug", True) is not False
+    return config
+
+
+def sanitize_monitors(raw):
+    monitors = []
+    if not isinstance(raw, list):
+        return monitors
+    for entry in raw[:MAX_MONITORS]:
+        if not isinstance(entry, dict):
+            continue
+        output = str(entry.get("output", "")).strip()
+        if not OUTPUT_RE.match(output):
+            continue
+        monitor = {"output": output}
+        if entry.get("disabled"):
+            monitor["disabled"] = True
+            monitors.append(monitor)
+            continue
+        for key in ("mode", "position", "mirror"):
+            value = entry.get(key)
+            if isinstance(value, (str, int, float)) and str(value).strip():
+                monitor[key] = str(value).strip()[:48]
+        for key in ("scale", "transform"):
+            value = entry.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                monitor[key] = value
+        monitors.append(monitor)
+    return monitors
+
+
+def load():
+    try:
+        with open(CONFIG_PATH, "r") as handle:
+            return sanitize(json.load(handle))
+    except (OSError, ValueError):
+        return blank_config()
+
+
+def save(config):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    handle, tmp = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".profiles.", suffix=".json")
+    try:
+        with os.fdopen(handle, "w") as out:
+            json.dump(config, out, indent=2, ensure_ascii=False)
+            out.write("\n")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, CONFIG_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def backup():
+    """Keep the previous file before a capture overwrites an arrangement.
+
+    Under CONFIG_DIR, never under ~/.config/omarchy/plugins/ -- the shell loads
+    every directory in there as a plugin, so a backup beside the plugin would
+    come up as a second copy of this one.
+    """
+    if not os.path.exists(CONFIG_PATH):
+        return
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    try:
+        shutil.copy2(CONFIG_PATH, os.path.join(BACKUP_DIR, "profiles.%s.json" % stamp))
+    except OSError:
+        return
+    keep = sorted(glob(os.path.join(BACKUP_DIR, "profiles.*.json")))[:-10]
+    for old in keep:
+        try:
+            os.unlink(old)
+        except OSError:
+            pass
+
+
+# ------------------------------------------------------------------ resolution
+
+def write_runtime(path, text):
+    """Best effort: a runtime note is never worth failing a command over."""
+    try:
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
+        with open(path, "w") as handle:
+            handle.write(text)
+    except OSError:
+        pass
+
+
+def read_applied():
+    try:
+        with open(APPLIED_PATH, "r") as handle:
+            return handle.readline().strip()
+    except OSError:
+        return None
+
+
+def profile_by_id(config, pid):
+    for profile in config["profiles"]:
+        if profile["id"] == pid:
+            return profile
+    return None
+
+
+def auto_pick(config, connected):
+    """The most specific profile whose every required output is plugged in.
+
+    Most specific wins so the desk (four screens) beats the two-screen home
+    setup, which in turn beats the laptop on its own -- without depending on the
+    order somebody happened to save them in. A profile with an empty `match`
+    matches everything and is therefore the last resort.
+    """
+    best = None
+    for profile in config["profiles"]:
+        required = profile["match"]
+        if not all(output in connected for output in required):
+            continue
+        if best is None or len(required) > len(best["match"]):
+            best = profile
+    return best
+
+
+def effective(config, connected=None):
+    if config["active"] == AUTO:
+        return auto_pick(config, connected if connected is not None else connected_outputs())
+    return profile_by_id(config, config["active"])
+
+
+# -------------------------------------------------------------------- commands
+
+def cmd_init(args):
+    if os.path.exists(CONFIG_PATH) and not args.force:
+        print(CONFIG_PATH)
+        return 0
+    save(load() if os.path.exists(CONFIG_PATH) else blank_config())
+    print(CONFIG_PATH)
+    return 0
+
+
+def cmd_status(args):
+    config = load()
+    connected = connected_outputs()
+    chosen = effective(config, connected)
+    auto = auto_pick(config, connected)
+    payload = {
+        "configPath": CONFIG_PATH,
+        "active": config["active"],
+        "hotplug": config["hotplug"],
+        "effectiveId": chosen["id"] if chosen else "",
+        "autoId": auto["id"] if auto else "",
+        "connected": connected,
+        "profiles": [dict(p, matches=all(o in connected for o in p["match"]),
+                          configured=bool(p["monitors"]))
+                     for p in config["profiles"]],
+    }
+    json.dump(payload, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_use(args):
+    config = load()
+    target = args.profile.strip()
+    if target != AUTO and profile_by_id(config, target) is None:
+        print("no such profile: %s" % target, file=sys.stderr)
+        return 2
+    config["active"] = target
+    save(config)
+    return reload_hyprland()
+
+
+def cmd_capture(args):
+    config = load()
+    profile = profile_by_id(config, args.profile.strip())
+    if profile is None:
+        print("no such profile: %s" % args.profile, file=sys.stderr)
+        return 2
+
+    monitors = hypr_monitors()
+    if monitors is None:
+        print("could not read the current arrangement from hyprctl", file=sys.stderr)
+        return 3
+
+    captured = []
+    for entry in monitors:
+        name = str(entry.get("name", ""))
+        if not OUTPUT_RE.match(name):
+            continue
+        if entry.get("disabled"):
+            captured.append({"output": name, "disabled": True})
+            continue
+        monitor = {
+            "output": name,
+            "mode": "%dx%d@%s" % (int(entry.get("width", 0)), int(entry.get("height", 0)),
+                                  trim(entry.get("refreshRate", 60))),
+            "position": "%dx%d" % (int(entry.get("x", 0)), int(entry.get("y", 0))),
+            "scale": round(float(entry.get("scale", 1)), 6),
+        }
+        transform = int(entry.get("transform", 0) or 0)
+        if transform:
+            monitor["transform"] = transform
+        mirror = str(entry.get("mirrorOf", "none"))
+        if mirror and mirror != "none":
+            monitor["mirror"] = mirror
+        captured.append(monitor)
+
+    if not captured:
+        print("hyprctl reported no usable monitors", file=sys.stderr)
+        return 3
+
+    backup()
+    profile["monitors"] = sanitize_monitors(captured)
+    # An arrangement is only meaningful with the screens it was built for, so
+    # the fingerprint for auto-selection comes from the capture itself. Screens
+    # the profile switches off are left out: a laptop-only profile must not
+    # start requiring the external monitor it exists to disable.
+    profile["match"] = sorted({m["output"] for m in profile["monitors"]
+                               if not m.get("disabled")})
+    if args.name:
+        profile["name"] = args.name.strip()[:MAX_NAME]
+    save(config)
+    print("captured %d monitors into %s" % (len(profile["monitors"]), profile["id"]))
+    return 0
+
+
+def cmd_emit(args):
+    """One line per monitor for lua/profiles.lua.
+
+    Runs during Hyprland's config parse, so it must never fail loudly: a broken
+    profiles.json prints nothing and the Hyprland fallback rule takes over,
+    which beats leaving the user without a display config at all.
+    """
+    try:
+        config = load()
+        profile = effective(config)
+        # Record what this parse put on screen, so `sync` can tell a hotplug
+        # that changes the answer from one that does not.
+        write_runtime(APPLIED_PATH, (profile["id"] if profile else "") + "\n")
+        # A leading directive line, so the Lua side learns whether to install
+        # the hotplug hook without paying for a second subprocess mid-parse.
+        print("!hotplug=%d" % (1 if config["hotplug"] else 0))
+        if profile is None:
+            return 0
+        for monitor in profile["monitors"]:
+            fields = []
+            for key in ("output", "mode", "position", "scale", "transform", "mirror"):
+                if key in monitor:
+                    fields.append("%s=%s" % (key, monitor[key]))
+            if monitor.get("disabled"):
+                fields.append("disabled=1")
+            print("\t".join(fields))
+    except Exception:
+        return 0
+    return 0
+
+
+def cmd_sync(args):
+    """Reload Hyprland if, and only if, the resolved profile has changed.
+
+    This is what the hotplug hook calls. Docking adds several outputs and fires
+    one event each, so the work is serialised behind a lock and given a moment
+    to settle -- otherwise a two-monitor dock would order two reloads, and the
+    second would land while the first was still being parsed.
+    """
+    try:
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
+        lock = open(LOCK_PATH, "w")
+    except OSError:
+        return 0
+
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in (errno.EAGAIN, errno.EACCES):
+            # Another event from the same plug is already handling this.
+            return 0
+        return 0
+
+    try:
+        time.sleep(max(0.0, min(10.0, args.delay)))
+
+        config = load()
+        profile = effective(config)
+        wanted = profile["id"] if profile else ""
+        applied = read_applied()
+
+        stamp = time.strftime("%H:%M:%S")
+        if applied is not None and applied == wanted:
+            write_runtime(TRACE_PATH,
+                          "%s unchanged (%s)\n" % (stamp, wanted or "none"))
+            return 0
+
+        write_runtime(TRACE_PATH, "%s %s -> %s, reloading\n"
+                      % (stamp, applied if applied else "none", wanted or "none"))
+        return reload_hyprland()
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+
+
+def cmd_path(args):
+    print(CONFIG_PATH)
+    return 0
+
+
+def trim(value):
+    return ("%.3f" % float(value)).rstrip("0").rstrip(".")
+
+
+def reload_hyprland():
+    if not shutil.which("hyprctl"):
+        return 0
+    try:
+        subprocess.run(["hyprctl", "reload"], capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return 4
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    init = sub.add_parser("init", help="create profiles.json if it is missing")
+    init.add_argument("--force", action="store_true", help="rewrite the sanitized config")
+    init.set_defaults(func=cmd_init)
+
+    status = sub.add_parser("status", help="print profiles and the current pick as JSON")
+    status.set_defaults(func=cmd_status)
+
+    use = sub.add_parser("use", help="switch to a profile, or 'auto'")
+    use.add_argument("profile")
+    use.set_defaults(func=cmd_use)
+
+    capture = sub.add_parser("capture", help="save the current arrangement into a profile")
+    capture.add_argument("profile")
+    capture.add_argument("--name", default="", help="rename the profile while capturing")
+    capture.set_defaults(func=cmd_capture)
+
+    emit = sub.add_parser("emit", help="print the active arrangement for monitors.lua")
+    emit.set_defaults(func=cmd_emit)
+
+    sync = sub.add_parser(
+        "sync", help="reload Hyprland if the connected screens changed the answer")
+    sync.add_argument("--delay", type=float, default=1.2,
+                      help="seconds to let hotplug events settle first")
+    sync.set_defaults(func=cmd_sync)
+
+    where = sub.add_parser("path", help="print the config path")
+    where.set_defaults(func=cmd_path)
+
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

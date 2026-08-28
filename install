@@ -1,0 +1,85 @@
+#!/bin/bash
+# Wires the plugin into Hyprland and puts `monitor-profiles` on your PATH.
+#
+# Two things happen here:
+#   1. ~/.config/hypr/monitors.lua gets one dofile line, which is what actually
+#      applies the active profile. Without it the widget can switch profiles
+#      but nothing moves.
+#   2. bin/monitor-profiles is linked into ~/.local/bin, so you can switch from
+#      a shell too. The widget does not need this -- it calls the script by
+#      absolute path.
+#
+# Idempotent: running it twice changes nothing the second time.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEST_DIR="$HOME/.local/bin"
+MONITORS="$HOME/.config/hypr/monitors.lua"
+LOADER="$SCRIPT_DIR/lua/profiles.lua"
+MARKER="themo.monitor-profiles/lua/profiles.lua"
+
+[[ -x $SCRIPT_DIR/bin/monitor-profiles ]] || {
+  echo "Missing or not executable: $SCRIPT_DIR/bin/monitor-profiles" >&2
+  exit 1
+}
+
+# ---------------------------------------------------------------- the loader
+if [[ ! -f $MONITORS ]]; then
+  echo "No $MONITORS -- is this an Omarchy system?" >&2
+  exit 1
+fi
+
+if grep -qF "$MARKER" "$MONITORS"; then
+  echo "Already wired into monitors.lua"
+else
+  cp "$MONITORS" "$MONITORS.bak.$(date +%s)" || exit 1
+  cat >>"$MONITORS" <<LUA
+
+-- Applies the arrangement of the active profile (themo.monitor-profiles).
+-- Switch profiles from the bar widget, or with: monitor-profiles use <id|auto>
+dofile(os.getenv("HOME")
+  .. "/.config/omarchy/plugins/themo.monitor-profiles/lua/profiles.lua")
+LUA
+  echo "Added the loader to $MONITORS (previous version kept as .bak.*)"
+  echo "It also reloads on monitor hotplug; set \"hotplug\": false in"
+  echo "profiles.json if you would rather nothing moved by itself."
+fi
+
+# Any monitor lines already in monitors.lua still apply and, being earlier in
+# the file, are overridden by the profile. Worth knowing before wondering why
+# a stale rule seems to have no effect.
+if grep -qE '^\s*hl\.monitor\(\{\s*output\s*=\s*"[^"]+"' "$MONITORS"; then
+  echo "Note: monitors.lua still has its own hl.monitor lines for named outputs."
+  echo "      The active profile is applied after them and wins. Capture your"
+  echo "      setups, then delete those lines to keep one source of truth."
+fi
+
+# ------------------------------------------------------------------ the CLI
+mkdir -p "$DEST_DIR" || { echo "Cannot create $DEST_DIR" >&2; exit 1; }
+
+dest="$DEST_DIR/monitor-profiles"
+source="$SCRIPT_DIR/bin/monitor-profiles"
+
+if [[ -L $dest ]]; then
+  if [[ "$(readlink -f "$dest")" == "$(readlink -f "$source")" ]]; then
+    echo "Already linked: $dest"
+  else
+    rm -f "$dest" && ln -s "$source" "$dest" && echo "Relinked: $dest"
+  fi
+elif [[ -e $dest ]]; then
+  mv -n "$dest" "$dest.bak" && echo "Existing file moved to $dest.bak"
+  ln -s "$source" "$dest" && echo "Linked: $dest"
+else
+  ln -s "$source" "$dest" && echo "Linked: $dest"
+fi
+
+case ":$PATH:" in
+  *":$DEST_DIR:"*) ;;
+  *) echo "Note: $DEST_DIR is not on your PATH." ;;
+esac
+
+"$source" init >/dev/null && echo "Profiles: $("$source" path)"
+echo
+echo "Add the widget to the bar with:"
+echo "  omarchy plugin enable themo.monitor-profiles right"

@@ -1,0 +1,76 @@
+#!/bin/bash
+# Removes what install created. Your profiles stay -- see the README for how to
+# remove those as well.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEST_DIR="$HOME/.local/bin"
+MONITORS="$HOME/.config/hypr/monitors.lua"
+MARKER="themo.monitor-profiles/lua/profiles.lua"
+
+# ---------------------------------------------------------------- the loader
+if [[ -f $MONITORS ]] && grep -qF "$MARKER" "$MONITORS"; then
+  cp "$MONITORS" "$MONITORS.bak.$(date +%s)" || exit 1
+  python3 - "$MONITORS" <<'PY' || { echo "monitors.lua left unchanged" >&2; exit 1; }
+import sys
+
+MARKER = "themo.monitor-profiles/lua/profiles.lua"
+path = sys.argv[1]
+out = open(path).readlines()
+
+
+def find_block(lines):
+    """Range of the loader call, its comments and the blank line above, or None.
+
+    Keyed on the path rather than on install's exact wording, so a line somebody
+    reformatted by hand still comes out. The call is written across two lines,
+    hence walking back to the dofile( that owns the marker.
+    """
+    for i, line in enumerate(lines):
+        if MARKER not in line:
+            continue
+        start = i
+        while start > 0 and not lines[start].lstrip().startswith("dofile("):
+            start -= 1
+        if not lines[start].lstrip().startswith("dofile("):
+            continue
+        while start > 0 and lines[start - 1].lstrip().startswith("--"):
+            start -= 1
+        if start > 0 and lines[start - 1].strip() == "":
+            start -= 1
+        return start, i + 1
+    return None
+
+
+while True:
+    block = find_block(out)
+    if block is None:
+        break
+    del out[block[0]:block[1]]
+
+# A bug above must not cost somebody their display config.
+if not any(line.strip() for line in out):
+    sys.exit("refusing to write an empty monitors.lua")
+
+open(path, "w").writelines(out)
+PY
+  echo "Removed the loader from $MONITORS (previous version kept as .bak.*)"
+  echo "Your screens now follow whatever else monitors.lua says --"
+  echo "run 'hyprctl reload' and check 'hyprctl monitors'."
+else
+  echo "Nothing to remove from monitors.lua"
+fi
+
+# ------------------------------------------------------------------ the CLI
+dest="$DEST_DIR/monitor-profiles"
+# Only remove a symlink that actually points into this plugin. Anything else
+# belongs to someone else and stays.
+if [[ -L $dest && "$(readlink -f "$dest")" == "$(readlink -f "$SCRIPT_DIR/bin/monitor-profiles")" ]]; then
+  rm -f "$dest" && echo "Removed: $dest"
+elif [[ -e $dest ]]; then
+  echo "Left alone (not ours): $dest"
+fi
+
+kept="$("$SCRIPT_DIR/bin/monitor-profiles" path 2>/dev/null)"
+echo "Kept: ${kept:-your saved setups}"

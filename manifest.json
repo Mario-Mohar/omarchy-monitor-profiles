@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "id": "themo.monitor-profiles",
+  "name": "Monitor Profiles",
+  "version": "1.0.0",
+  "author": "themo",
+  "license": "MIT",
+  "description": "Named monitor arrangements in the Omarchy bar. Capture how your screens are placed right now, save it as Desk, Home or Presentation, and switch back with one click. Auto mode picks the profile whose screens are actually plugged in, so docking and undocking sorts itself out.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Monitor Profiles",
+    "description": "Switch between saved monitor arrangements from the bar. Each profile records resolution, position, scale and rotation per output; Auto selects the most specific profile whose screens are all connected.",
+    "category": "Compositor",
+    "aliases": [
+      "arrangement",
+      "display",
+      "dock",
+      "hyprland",
+      "layout",
+      "monitor",
+      "profile",
+      "screen",
+      "setup",
+      "undock"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showLabel": true,
+      "refreshIntervalSec": 30
+    },
+    "schema": [
+      {
+        "key": "showLabel",
+        "type": "boolean",
+        "label": "Show the profile name",
+        "defaultValue": true,
+        "description": "Put the active profile's name next to its icon. Turn off for an icon-only pill."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Re-check screens every (seconds)",
+        "min": 5,
+        "max": 300,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "How often the list of connected outputs is re-read. Plugging a monitor in or out is picked up immediately regardless."
+      }
+    ]
+  }
+}
