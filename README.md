@@ -31,7 +31,7 @@ omarchy plugin enable themo.monitor-profiles right
 ```
 
 **Requirements:** Hyprland with the Lua config (Omarchy's default) and Python 3
-— standard library only, nothing to pip install.
+— the standard library alone, with no additional packages to fetch.
 
 ## Using it
 
