@@ -22,10 +22,12 @@ Item {
   property string autoId: ""            // what auto would pick
   property var connected: []            // connector names the kernel reports
   property string configPath: ""
+  property int maxProfiles: 12          // the helper's MAX_PROFILES, via status
   property string error: ""
   property bool everLoaded: false
 
   readonly property bool busy: useProcess.running || captureProcess.running
+    || addProcess.running || removeProcess.running
   readonly property bool isAuto: active === "auto"
 
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 30, 5, 300)
@@ -75,10 +77,30 @@ Item {
     useProcess.running = true
   }
 
-  function capture(id) {
-    if (busy || !id) return
+  function startCapture(id) {
     captureProcess.command = [scriptPath(), "capture", String(id)]
     captureProcess.running = true
+  }
+
+  function capture(id) {
+    if (busy || !id) return
+    startCapture(id)
+  }
+
+  // The helper derives the id from the name, because ID_RE, the length cap and
+  // the collision suffix all live there -- one place decides what an id is.
+  function add(name) {
+    if (busy) return
+    var wanted = String(name || "").trim()
+    if (wanted === "") return
+    addProcess.command = [scriptPath(), "add", "--name", wanted]
+    addProcess.running = true
+  }
+
+  function remove(id) {
+    if (busy || !id || id === "auto") return
+    removeProcess.command = [scriptPath(), "remove", String(id)]
+    removeProcess.running = true
   }
 
   // Middle click and wheel walk the configured profiles without opening the
@@ -113,6 +135,8 @@ Item {
     root.everLoaded = true
     root.error = ""
     root.configPath = String(payload.configPath || "")
+    root.maxProfiles = parseInt(payload.maxProfiles, 10) > 0
+      ? parseInt(payload.maxProfiles, 10) : root.maxProfiles
     root.active = String(payload.active || "auto")
     root.effectiveId = String(payload.effectiveId || "")
     root.autoId = String(payload.autoId || "")
@@ -193,6 +217,60 @@ Item {
       root.error = exitCode === 0 ? ""
         : (String(captureStderr.text || "").trim() || "could not capture the arrangement")
       root.refresh()
+    }
+  }
+
+  Timer {
+    id: addWatchdog
+    interval: root.watchdogMs
+    onTriggered: { addProcess.signal(15); root.error = "creating the setup timed out" }
+  }
+
+  Process {
+    id: addProcess
+    command: []
+    stdout: StdioCollector { id: addStdout; waitForEnd: true }
+    stderr: StdioCollector { id: addStderr; waitForEnd: true }
+    onRunningChanged: running ? addWatchdog.restart() : addWatchdog.stop()
+    onExited: function (exitCode) {
+      if (exitCode !== 0) {
+        root.error = String(addStderr.text || "").trim() || "could not create the setup"
+        root.refresh()
+        return
+      }
+      root.error = ""
+      var id = ""
+      try {
+        id = String((JSON.parse(root.takeOutput(addStdout, "add")) || {}).id || "")
+      } catch (e) {
+        id = ""
+      }
+      // A new slot is empty, and an empty slot is not a setup yet: saving the
+      // arrangement that is on screen is the reason anyone named it. This goes
+      // round the busy guard on purpose -- it is the tail of one user action,
+      // not a second one.
+      if (id !== "") root.startCapture(id)
+      else root.refresh()
+    }
+  }
+
+  Timer {
+    id: removeWatchdog
+    interval: root.watchdogMs
+    onTriggered: { removeProcess.signal(15); root.error = "deleting the setup timed out" }
+  }
+
+  Process {
+    id: removeProcess
+    command: []
+    stderr: StdioCollector { id: removeStderr; waitForEnd: true }
+    onRunningChanged: running ? removeWatchdog.restart() : removeWatchdog.stop()
+    onExited: function (exitCode) {
+      root.error = exitCode === 0 ? ""
+        : (String(removeStderr.text || "").trim() || "could not delete the setup")
+      // Deleting the pinned profile drops back to auto and reloads Hyprland, so
+      // give the screens the same moment to settle that switching does.
+      settle.restart()
     }
   }
 

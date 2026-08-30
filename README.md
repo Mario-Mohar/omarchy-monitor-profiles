@@ -42,10 +42,18 @@ Click the pill to open the list. Clicking a row pins that setup; clicking
 |---|---|
 | Click a row | Pin that setup |
 | 󰆓 on a row | Save the current arrangement into that setup |
+| 󰆴 on a row | Delete that setup — click it twice, the second click confirms |
+| **New setup** at the bottom | Name a new setup; the screens as they are now get saved into it |
 | 󰏫 in the header | Open `profiles.json` in your editor |
 | Middle click the pill | Cycle Auto → setup 1 → setup 2 → … |
 | Scroll the pill | Same, in either direction |
 | ↑ ↓ and Enter | Move and apply, without the mouse |
+
+Twelve setups fit; three come with the plugin. **New setup** at the bottom of
+the list asks for a name, turns it into an id and saves the current
+arrangement straight into it — arrange, name, done. Deleting keeps a copy of
+the previous `profiles.json` under `backups/`, and if you delete the setup
+that is pinned, the widget drops back to Auto.
 
 The three setups start empty. Arrange your screens the way you want them —
 with `nwg-displays`, `hyprctl keyword monitor …`, or by hand in
@@ -95,6 +103,9 @@ monitor-profiles status          # what is saved and what is on screen, as JSON
 monitor-profiles use desk        # pin a setup
 monitor-profiles use auto        # back to following the screens
 monitor-profiles capture desk    # save the current arrangement into "desk"
+monitor-profiles add --name "Office upstairs"   # new empty slot, id derived from the name
+monitor-profiles add kitchen --name "Kitchen TV"  # or name the id yourself
+monitor-profiles remove kitchen  # delete it, keeping a backup first
 monitor-profiles sync            # reload, but only if the resolved setup changed
 monitor-profiles path            # where profiles.json lives
 ```
@@ -116,7 +127,11 @@ and calls to it come back `Target not found`.
 Lives at `~/.config/omarchy/monitor-profiles/profiles.json` (or under
 `$XDG_CONFIG_HOME`). Edit it by hand if you prefer — the widget watches the
 file and picks changes up immediately. Add or remove setups freely; three is
-just what it starts with.
+just what it starts with, and twelve is the ceiling.
+
+An empty `"profiles": []` stays empty — the three shipped setups only come
+back if the file is missing or unreadable, not after you have deleted the
+last one on purpose.
 
 ```json
 {

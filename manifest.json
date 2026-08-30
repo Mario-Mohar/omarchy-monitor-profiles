@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "themo.monitor-profiles",
   "name": "Monitor Profiles",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "themo",
   "license": "MIT",
   "description": "Named monitor arrangements in the Omarchy bar. Capture how your screens are placed right now, save it as Desk, Home or Presentation, and switch back with one click. Auto mode picks the profile whose screens are actually plugged in, so docking and undocking sorts itself out.",

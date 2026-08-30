@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from glob import glob
 
 CONFIG_DIR = os.path.join(
@@ -136,8 +137,15 @@ def sanitize(raw):
             "monitors": sanitize_monitors(entry.get("monitors")),
         })
 
+    raw_profiles = raw.get("profiles")
     if profiles:
         config["profiles"] = profiles
+    elif isinstance(raw_profiles, list) and not raw_profiles:
+        # An empty list is somebody having deleted their last profile, and the
+        # three shipped slots must not walk back in behind them. A list that
+        # merely held nothing usable still falls through to the defaults, which
+        # is what makes a mangled file recoverable.
+        config["profiles"] = []
 
     active = str(raw.get("active") or AUTO).strip()
     config["active"] = active if active == AUTO or active in seen else AUTO
@@ -289,6 +297,9 @@ def cmd_status(args):
     auto = auto_pick(config, connected)
     payload = {
         "configPath": CONFIG_PATH,
+        # Reported rather than repeated in QML: the panel hides its "New setup"
+        # row at the ceiling, and two copies of the number would drift.
+        "maxProfiles": MAX_PROFILES,
         "active": config["active"],
         "hotplug": config["hotplug"],
         "effectiveId": chosen["id"] if chosen else "",
@@ -366,6 +377,88 @@ def cmd_capture(args):
     save(config)
     print("captured %d monitors into %s" % (len(profile["monitors"]), profile["id"]))
     return 0
+
+
+def derive_id(name, taken):
+    """An id satisfying ID_RE, from a name somebody typed into the panel.
+
+    "Office upstairs" is not an id, and neither is "Buro". The id is what
+    `use`, the IPC target and monitors.lua all address, so it has to be plain,
+    stable and unique -- while the name stays whatever was typed.
+    """
+    text = str(name or "").lower().replace("\u00df", "ss")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")[:32].strip("-")
+    if not ID_RE.match(text or ""):
+        text = "setup"
+    if text not in taken:
+        return text
+    # Two setups may well be called the same thing; two ids may not.
+    for n in range(2, 100):
+        suffix = "-%d" % n
+        candidate = (text[:32 - len(suffix)].strip("-") or "setup") + suffix
+        if candidate not in taken:
+            return candidate
+    return ""
+
+
+def cmd_add(args):
+    config = load()
+    taken = set(p["id"] for p in config["profiles"])
+    taken.add(AUTO)
+    name = str(args.name or "").strip()[:MAX_NAME]
+    pid = str(args.id or "").strip()
+
+    if not pid:
+        if not name:
+            print("add needs an id or --name", file=sys.stderr)
+            return 2
+        pid = derive_id(name, taken)
+
+    if not ID_RE.match(pid or "") or pid == AUTO:
+        print("not a usable profile id: %s" % (pid or name), file=sys.stderr)
+        return 2
+    if pid in taken:
+        print("profile already exists: %s" % pid, file=sys.stderr)
+        return 2
+    if len(config["profiles"]) >= MAX_PROFILES:
+        print("at most %d profiles" % MAX_PROFILES, file=sys.stderr)
+        return 2
+
+    # Deliberately empty, exactly like the three shipped slots: an arrangement
+    # gets in through `capture`, which is the one code path that reads hyprctl.
+    config["profiles"].append({
+        "id": pid, "name": name or pid, "icon": str(args.icon or "")[:8],
+        "match": [], "monitors": []})
+    save(config)
+    json.dump({"id": pid, "name": name or pid}, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_remove(args):
+    config = load()
+    pid = str(args.profile or "").strip()
+    if profile_by_id(config, pid) is None:
+        print("no such profile: %s" % pid, file=sys.stderr)
+        return 2
+
+    # A captured arrangement is work, and this is the one command that throws
+    # it away.
+    backup()
+    config["profiles"] = [p for p in config["profiles"] if p["id"] != pid]
+    switched = config["active"] == pid
+    if switched:
+        # sanitize() would fall back to auto on the next read regardless, but
+        # doing it here means the file never spends a moment pointing at a
+        # profile that is gone -- and the caller gets told, because the screens
+        # are about to be rearranged.
+        config["active"] = AUTO
+    save(config)
+    json.dump({"id": pid, "switchedToAuto": switched}, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return reload_hyprland() if switched else 0
 
 
 def cmd_emit(args):
@@ -490,6 +583,17 @@ def main():
     sync.add_argument("--delay", type=float, default=1.2,
                       help="seconds to let hotplug events settle first")
     sync.set_defaults(func=cmd_sync)
+
+    add = sub.add_parser("add", help="create an empty profile slot")
+    add.add_argument("id", nargs="?", default="",
+                     help="profile id; derived from --name when left out")
+    add.add_argument("--name", default="", help="display name")
+    add.add_argument("--icon", default="", help="glyph shown in the panel row")
+    add.set_defaults(func=cmd_add)
+
+    remove = sub.add_parser("remove", help="delete a profile")
+    remove.add_argument("profile")
+    remove.set_defaults(func=cmd_remove)
 
     where = sub.add_parser("path", help="print the config path")
     where.set_defaults(func=cmd_path)

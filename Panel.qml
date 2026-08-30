@@ -40,13 +40,25 @@ Panel {
   readonly property string glyphMulti: "󰍺"
   readonly property string glyphCapture: "󰆓"
   readonly property string glyphActive: "󰄬"
+  readonly property string glyphDelete: "󰆴"
+  readonly property string glyphNew: "󰐕"
 
   // Auto is a row like any other, so one Repeater and one set of key handlers
   // cover the whole list.
+  // "New setup" is a row like the others so that one Repeater and one set of
+  // key handlers still cover the whole list -- it is reachable with the arrow
+  // keys and Return, not only with the mouse. Its id cannot collide with a
+  // profile's: ID_RE does not allow a "+".
+  readonly property string newRowId: "+new"
+  readonly property int maxProfiles: service ? service.maxProfiles : 12
+
   readonly property var rows: {
-    var out = [{ "id": "auto", "isAuto": true }]
+    var out = [{ "id": "auto", "isAuto": true, "isNew": false }]
     for (var i = 0; i < profiles.length; i++)
-      out.push({ "id": profiles[i].id, "isAuto": false, "profile": profiles[i] })
+      out.push({ "id": profiles[i].id, "isAuto": false, "isNew": false,
+                 "profile": profiles[i] })
+    if (profiles.length < maxProfiles)
+      out.push({ "id": newRowId, "isAuto": false, "isNew": true })
     return out
   }
 
@@ -87,17 +99,91 @@ Panel {
     function toggle(): void { root.toggle() }
     function use(id: string): string { root.applyRow(id); return "ok" }
     function capture(id: string): string { root.captureRow(id); return "ok" }
+    // add names a setup and saves the screens into it in one go; remove deletes
+    // one outright. The panel's two-click confirmation is a guard against a
+    // misclick, not a rule -- a script that asks for a delete has decided.
+    function add(name: string): string { root.commitCreate(name); return "ok" }
+    function remove(id: string): string {
+      if (root.service) root.service.remove(id)
+      return "ok"
+    }
     function cycle(): string { if (root.service) root.service.cycle(1); return "ok" }
     function refresh(): string { root.refresh(); return "ok" }
   }
 
+  // ---- Creating and deleting ---------------------------------------------
+
+  property bool creating: false
+  // Deleting throws away a captured arrangement, so it takes two clicks: the
+  // first arms this, the second does it. Anything else disarms it again.
+  property string pendingDeleteId: ""
+
+  // The field lives inside the Repeater delegate, where its id is out of reach
+  // from here, so it takes its own focus when it appears and hands the typed
+  // name back rather than being read out of.
+  function startCreating() {
+    if (busy || profiles.length >= maxProfiles) return
+    pendingDeleteId = ""
+    cursorId = newRowId
+    creating = true
+  }
+
+  function cancelCreating() {
+    creating = false
+    Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+  }
+
+  function commitCreate(name) {
+    var wanted = String(name || "").trim()
+    if (wanted === "") { cancelCreating(); return }
+    // The helper turns the name into an id and then captures the screens as
+    // they are right now -- arrange, name, saved.
+    if (service) service.add(wanted)
+    cancelCreating()
+  }
+
+  function deleteRow(id) {
+    if (!service || busy || id === "auto" || id === newRowId) return
+    if (pendingDeleteId === id) {
+      pendingDeleteId = ""
+      service.remove(id)
+      return
+    }
+    pendingDeleteId = id
+    deleteArmed.restart()
+  }
+
+  function disarmDelete() {
+    pendingDeleteId = ""
+    deleteArmed.stop()
+  }
+
+  // An armed delete that nobody confirms goes back to sleep rather than
+  // waiting for the next visit to the panel.
+  Timer {
+    id: deleteArmed
+    interval: 4000
+    repeat: false
+    onTriggered: root.pendingDeleteId = ""
+  }
+
+  onOpenedChanged: {
+    if (!opened) {
+      disarmDelete()
+      creating = false
+    }
+  }
+
   function applyRow(id) {
+    if (id === newRowId) { root.startCreating(); return }
+    disarmDelete()
     if (!service || busy) return
     service.use(id)
   }
 
   function captureRow(id) {
-    if (!service || busy || id === "auto") return
+    if (!service || busy || id === "auto" || id === newRowId) return
+    disarmDelete()
     service.capture(id)
   }
 
@@ -246,6 +332,8 @@ Panel {
                 height: root.rowHeight
 
                 readonly property bool isAuto: modelData.isAuto
+                readonly property bool isNew: modelData.isNew === true
+                readonly property bool armed: root.pendingDeleteId === modelData.id
                 readonly property var profile: modelData.profile || null
                 readonly property bool pinned: root.active === modelData.id
                 readonly property bool onScreen: !isAuto && root.effectiveId === modelData.id
@@ -271,8 +359,10 @@ Panel {
                 Text {
                   id: rowIcon
                   textFormat: Text.PlainText
-                  text: row.isAuto ? root.glyphAuto : root.profileIcon(row.profile)
-                  color: row.pinned ? root.accent : root.foreground
+                  text: row.isAuto ? root.glyphAuto
+                    : row.isNew ? root.glyphNew : root.profileIcon(row.profile)
+                  color: row.pinned ? root.accent
+                    : row.isNew ? root.dim : root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.icon
                   anchors.left: parent.left
@@ -292,20 +382,54 @@ Panel {
                     // Profile names come from a hand-edited file; without this
                     // Qt guesses whether to render them as markup.
                     textFormat: Text.PlainText
+                    visible: !(row.isNew && root.creating)
                     width: parent.width
                     elide: Text.ElideRight
-                    text: row.isAuto ? "Auto" : root.profileName(row.profile)
+                    text: row.isAuto ? "Auto"
+                      : row.isNew ? "New setup" : root.profileName(row.profile)
                     color: root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
+                  }
+
+                  TextField {
+                    id: nameField
+                    visible: row.isNew && root.creating
+                    width: parent.width
+                    placeholderText: "Name this setup, then Return"
+                    foreground: root.foreground
+                    font.family: root.fontFamily
+
+                    onVisibleChanged: {
+                      if (!visible) return
+                      text = ""
+                      Qt.callLater(function() { nameField.forceActiveFocus() })
+                    }
+
+                    Keys.onPressed: function(event) {
+                      if (event.key === Qt.Key_Escape) {
+                        root.cancelCreating()
+                        event.accepted = true
+                      } else if (event.key === Qt.Key_Return
+                                 || event.key === Qt.Key_Enter) {
+                        root.commitCreate(nameField.text)
+                        event.accepted = true
+                      }
+                    }
                   }
 
                   Text {
                     textFormat: Text.PlainText
                     width: parent.width
                     elide: Text.ElideRight
-                    text: row.isAuto ? root.autoSummary() : root.outputSummary(row.profile)
-                    color: root.dim
+                    text: {
+                      if (row.isAuto) return root.autoSummary()
+                      if (row.isNew)
+                        return "saves the screens as they are now under a name you pick"
+                      if (row.armed) return "click the bin again to delete this setup"
+                      return root.outputSummary(row.profile)
+                    }
+                    color: row.armed ? root.urgent : root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                   }
@@ -329,12 +453,24 @@ Panel {
                   }
 
                   PanelActionButton {
-                    visible: !row.isAuto
+                    visible: !row.isAuto && !row.isNew
                     iconText: root.glyphCapture
                     tooltipText: "Save the current arrangement into this setup"
                     enabled: !root.busy
                     anchors.verticalCenter: parent.verticalCenter
                     onClicked: root.captureRow(modelData.id)
+                  }
+
+                  PanelActionButton {
+                    visible: !row.isAuto && !row.isNew
+                    iconText: root.glyphDelete
+                    tooltipText: row.armed ? "Click again to delete this setup"
+                      : "Delete this setup"
+                    // Armed is worth seeing before the second click lands.
+                    foreground: row.armed ? root.urgent : root.foreground
+                    enabled: !root.busy
+                    anchors.verticalCenter: parent.verticalCenter
+                    onClicked: root.deleteRow(modelData.id)
                   }
                 }
               }
