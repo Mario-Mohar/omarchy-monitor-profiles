@@ -16,7 +16,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST_DIR="$HOME/.local/bin"
 MONITORS="$HOME/.config/hypr/monitors.lua"
-LOADER="$SCRIPT_DIR/lua/profiles.lua"
 MARKER="themo.monitor-profiles/lua/profiles.lua"
 
 [[ -x $SCRIPT_DIR/bin/monitor-profiles ]] || {
