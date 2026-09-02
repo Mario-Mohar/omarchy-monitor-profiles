@@ -1,5 +1,7 @@
 # Monitor Profiles — Omarchy bar widget
 
+[![codecov](https://codecov.io/gh/Mario-Mohar/omarchy-monitor-profiles/graph/badge.svg)](https://codecov.io/gh/Mario-Mohar/omarchy-monitor-profiles)
+
 Named monitor arrangements in the bar. Place your screens however you like,
 press the save button, and that setup is one click away from then on — at the
 desk, at home, or with the laptop on its own.
