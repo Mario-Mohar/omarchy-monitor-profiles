@@ -304,6 +304,10 @@ def cmd_status(args):
         "hotplug": config["hotplug"],
         "effectiveId": chosen["id"] if chosen else "",
         "autoId": auto["id"] if auto else "",
+        # What Hyprland last applied, as recorded by `emit` during its config
+        # parse. It differs from effectiveId with hotplug off, or between a plug
+        # and the reload, and only this one is actually on screen.
+        "appliedId": read_applied() or "",
         "connected": connected,
         "profiles": [dict(p, matches=all(o in connected for o in p["match"]),
                           configured=bool(p["monitors"]))
