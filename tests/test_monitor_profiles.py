@@ -281,3 +281,39 @@ def test_save_writes_readable_json(mp):
     mp.save(mp.sanitize({"profiles": [{"id": "desk", "name": "Büro"}]}))
     with open(mp.CONFIG_PATH) as handle:
         assert json.load(handle)["profiles"][0]["name"] == "Büro"
+
+
+# --------------------------------------------------------------------------
+# capture: what hyprctl reports becomes a profile
+# --------------------------------------------------------------------------
+
+def _capture(mp, monkeypatch, monitors):
+    import argparse
+    monkeypatch.setattr(mp, "hypr_monitors", lambda: monitors)
+    pid = mp.blank_config()["profiles"][0]["id"]
+    assert mp.cmd_capture(argparse.Namespace(profile=pid, name=None)) == 0
+    return {m["output"]: m for m in mp.profile_by_id(mp.load(), pid)["monitors"]}
+
+
+def _hypr(mid, name, x, mirror="none"):
+    return {"id": mid, "name": name, "width": 1920, "height": 1080,
+            "refreshRate": 60.0, "x": x, "y": 0, "scale": 1.0, "transform": 0,
+            "mirrorOf": mirror, "disabled": False}
+
+
+def test_capture_stores_a_mirror_as_the_output_name(mp, monkeypatch):
+    """hyprctl reports mirrorOf as a per-session monitor id (issue #8)."""
+    captured = _capture(mp, monkeypatch, [
+        _hypr(0, "eDP-1", 0),
+        _hypr(1, "HDMI-A-1", 1920, mirror="0"),
+    ])
+    assert captured["HDMI-A-1"]["mirror"] == "eDP-1"
+    assert "mirror" not in captured["eDP-1"]
+
+
+def test_capture_drops_a_mirror_it_cannot_resolve(mp, monkeypatch):
+    captured = _capture(mp, monkeypatch, [
+        _hypr(0, "eDP-1", 0),
+        _hypr(1, "HDMI-A-1", 1920, mirror="7"),
+    ])
+    assert "mirror" not in captured["HDMI-A-1"]

@@ -337,6 +337,12 @@ def cmd_capture(args):
         print("could not read the current arrangement from hyprctl", file=sys.stderr)
         return 3
 
+    # hyprctl reports mirrorOf as the session's monitor id, which is handed out
+    # in connection order and means nothing after a replug or reboot. The
+    # profile has to name the output instead.
+    names_by_id = {str(e.get("id")): str(e.get("name", "")) for e in monitors
+                   if isinstance(e, dict) and e.get("id") is not None}
+
     captured = []
     for entry in monitors:
         name = str(entry.get("name", ""))
@@ -355,8 +361,8 @@ def cmd_capture(args):
         transform = int(entry.get("transform", 0) or 0)
         if transform:
             monitor["transform"] = transform
-        mirror = str(entry.get("mirrorOf", "none"))
-        if mirror and mirror != "none":
+        mirror = names_by_id.get(str(entry.get("mirrorOf", "none")), "")
+        if OUTPUT_RE.match(mirror) and mirror != name:
             monitor["mirror"] = mirror
         captured.append(monitor)
 
