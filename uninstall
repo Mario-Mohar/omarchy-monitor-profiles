@@ -11,53 +11,106 @@ MARKER="themo.monitor-profiles/lua/profiles.lua"
 
 # ---------------------------------------------------------------- the loader
 if [[ -f $MONITORS ]] && grep -qF "$MARKER" "$MONITORS"; then
-  cp "$MONITORS" "$MONITORS.bak.$(date +%s)" || exit 1
-  python3 - "$MONITORS" <<'PY' || { echo "monitors.lua left unchanged" >&2; exit 1; }
+  backup="$MONITORS.bak.$(date +%s)"
+  cp "$MONITORS" "$backup" || exit 1
+  python3 - "$MONITORS" <<'PY'
 import sys
 
 MARKER = "themo.monitor-profiles/lua/profiles.lua"
 path = sys.argv[1]
-out = open(path).readlines()
+lines = open(path).readlines()
 
 
-def find_block(lines):
-    """Range of the loader call, its comments and the blank line above, or None.
+def code(line):
+    return line.split("--", 1)[0] if not line.lstrip().startswith("--") else ""
+
+
+def balanced(chunk):
+    text = "".join(code(line) for line in chunk)
+    return text.count("(") == text.count(")")
+
+
+def find_call(lines, i):
+    """(start, end) of the dofile call holding the marker on line i, or None.
 
     Keyed on the path rather than on install's exact wording, so a line somebody
-    reformatted by hand still comes out. The call is written across two lines,
-    hence walking back to the dofile( that owns the marker.
+    reformatted by hand still comes out -- but only when the marker sits in the
+    dofile( line itself or in the line straight after an unclosed dofile(
+    (install writes the call across two). Anything looser, such as the path in
+    a variable that a later dofile reads, is left for a human: guessing there
+    has cost people their own monitor lines before.
     """
-    for i, line in enumerate(lines):
-        if MARKER not in line:
-            continue
+    if lines[i].lstrip().startswith("dofile("):
         start = i
-        while start > 0 and not lines[start].lstrip().startswith("dofile("):
-            start -= 1
-        if not lines[start].lstrip().startswith("dofile("):
-            continue
-        while start > 0 and lines[start - 1].lstrip().startswith("--"):
-            start -= 1
-        if start > 0 and lines[start - 1].strip() == "":
-            start -= 1
-        return start, i + 1
-    return None
+    elif i > 0 and lines[i - 1].lstrip().startswith("dofile(") \
+            and not balanced(lines[i - 1:i]):
+        start = i - 1                # the call continues onto the marker line
+    else:
+        return None
+    end = i + 1
+    # A closing paren on a line of its own still belongs to the call.
+    if not balanced(lines[start:end]) and end < len(lines) \
+            and lines[end].strip() in (")", ");"):
+        end += 1
+    if not balanced(lines[start:end]):
+        return None
+    return start, end
 
 
-while True:
-    block = find_block(out)
-    if block is None:
-        break
-    del out[block[0]:block[1]]
+def with_own_comments(lines, start):
+    """Extend start over install's comment lines and the blank line above.
+
+    Only a comment block that names the plugin is ours; a comment somebody
+    wrote above their own config stays.
+    """
+    top = start
+    while top > 0 and lines[top - 1].lstrip().startswith("--"):
+        top -= 1
+    if top < start and any("monitor-profiles" in line for line in lines[top:start]):
+        start = top
+    if start > 0 and lines[start - 1].strip() == "":
+        start -= 1
+    return start
+
+
+blocks, manual = [], []
+for i, line in enumerate(lines):
+    if MARKER not in line or line.lstrip().startswith("--"):
+        continue                     # commented out: harmless, leave it
+    call = find_call(lines, i)
+    if call is None:
+        manual.append(i + 1)
+    else:
+        blocks.append((with_own_comments(lines, call[0]), call[1]))
+
+if manual:
+    for number in manual:
+        print("  line %d: %s" % (number, lines[number - 1].rstrip()), file=sys.stderr)
+    sys.exit(2)
+
+for start, end in reversed(blocks):
+    del lines[start:end]
 
 # A bug above must not cost somebody their display config.
-if not any(line.strip() for line in out):
+if not any(line.strip() for line in lines):
     sys.exit("refusing to write an empty monitors.lua")
 
-open(path, "w").writelines(out)
+open(path, "w").writelines(lines)
 PY
-  echo "Removed the loader from $MONITORS (previous version kept as .bak.*)"
-  echo "Your screens now follow whatever else monitors.lua says --"
-  echo "run 'hyprctl reload' and check 'hyprctl monitors'."
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    echo "Removed the loader from $MONITORS (previous version kept as .bak.*)"
+    echo "Your screens now follow whatever else monitors.lua says --"
+    echo "run 'hyprctl reload' and check 'hyprctl monitors'."
+  elif [[ $status -eq 2 ]]; then
+    rm -f "$backup"
+    echo "monitors.lua left unchanged: the plugin path above is not in a" >&2
+    echo "dofile( call this script can safely take apart. Remove the loader" >&2
+    echo "from $MONITORS by hand, then run 'hyprctl reload'." >&2
+  else
+    echo "monitors.lua left unchanged" >&2
+    exit 1
+  fi
 else
   echo "Nothing to remove from monitors.lua"
 fi
