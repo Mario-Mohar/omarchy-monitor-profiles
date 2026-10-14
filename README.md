@@ -179,6 +179,9 @@ omarchy plugin remove themo.monitor-profiles
 ```
 
 That takes the loader back out of `monitors.lua` and removes the PATH symlink.
+If you rewrote the loader so the plugin path no longer sits in the `dofile(`
+call itself (in a variable, say), uninstall leaves `monitors.lua` untouched and
+tells you which line to remove by hand.
 Your saved setups stay; delete `~/.config/omarchy/monitor-profiles/` to be rid
 of those too.
 

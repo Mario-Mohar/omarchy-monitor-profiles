@@ -18,7 +18,8 @@ Item {
   // One entry per profile: {id, name, icon, match, monitors, matches, configured}
   property var profiles: []
   property string active: "auto"        // "auto" or a profile id
-  property string effectiveId: ""       // what is on screen now
+  property string effectiveId: ""       // what the config selects now
+  property string appliedId: ""         // what Hyprland last applied (on screen)
   property string autoId: ""            // what auto would pick
   property var connected: []            // connector names the kernel reports
   property string configPath: ""
@@ -140,6 +141,7 @@ Item {
     root.active = String(payload.active || "auto")
     root.effectiveId = String(payload.effectiveId || "")
     root.autoId = String(payload.autoId || "")
+    root.appliedId = String(payload.appliedId || "")
     root.connected = Array.isArray(payload.connected) ? payload.connected : []
     root.profiles = Array.isArray(payload.profiles) ? payload.profiles : []
   }

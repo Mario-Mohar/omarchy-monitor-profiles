@@ -30,8 +30,8 @@ Panel {
 
   readonly property var profiles: service ? service.profiles : []
   readonly property string active: service ? service.active : "auto"
-  readonly property string effectiveId: service ? service.effectiveId : ""
   readonly property string autoId: service ? service.autoId : ""
+  readonly property string appliedId: service ? service.appliedId : ""
   readonly property string errorText: service ? service.error : ""
   readonly property bool busy: service ? service.busy : false
 
@@ -336,7 +336,7 @@ Panel {
                 readonly property bool armed: root.pendingDeleteId === modelData.id
                 readonly property var profile: modelData.profile || null
                 readonly property bool pinned: root.active === modelData.id
-                readonly property bool onScreen: !isAuto && root.effectiveId === modelData.id
+                readonly property bool onScreen: !isAuto && root.appliedId === modelData.id
                 readonly property bool hovered: rowMouse.containsMouse
                 readonly property bool cursored: root.cursorId === modelData.id
 

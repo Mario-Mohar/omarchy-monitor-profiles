@@ -281,3 +281,74 @@ def test_save_writes_readable_json(mp):
     mp.save(mp.sanitize({"profiles": [{"id": "desk", "name": "Büro"}]}))
     with open(mp.CONFIG_PATH) as handle:
         assert json.load(handle)["profiles"][0]["name"] == "Büro"
+
+
+# --------------------------------------------------------------------------
+# capture: what hyprctl reports becomes a profile
+# --------------------------------------------------------------------------
+
+def _capture(mp, monkeypatch, monitors):
+    import argparse
+    monkeypatch.setattr(mp, "hypr_monitors", lambda: monitors)
+    pid = mp.blank_config()["profiles"][0]["id"]
+    assert mp.cmd_capture(argparse.Namespace(profile=pid, name=None)) == 0
+    return {m["output"]: m for m in mp.profile_by_id(mp.load(), pid)["monitors"]}
+
+
+def _hypr(mid, name, x, mirror="none"):
+    return {"id": mid, "name": name, "width": 1920, "height": 1080,
+            "refreshRate": 60.0, "x": x, "y": 0, "scale": 1.0, "transform": 0,
+            "mirrorOf": mirror, "disabled": False}
+
+
+def test_capture_stores_a_mirror_as_the_output_name(mp, monkeypatch):
+    """hyprctl reports mirrorOf as a per-session monitor id (issue #8)."""
+    captured = _capture(mp, monkeypatch, [
+        _hypr(0, "eDP-1", 0),
+        _hypr(1, "HDMI-A-1", 1920, mirror="0"),
+    ])
+    assert captured["HDMI-A-1"]["mirror"] == "eDP-1"
+    assert "mirror" not in captured["eDP-1"]
+
+
+def test_capture_drops_a_mirror_it_cannot_resolve(mp, monkeypatch):
+    captured = _capture(mp, monkeypatch, [
+        _hypr(0, "eDP-1", 0),
+        _hypr(1, "HDMI-A-1", 1920, mirror="7"),
+    ])
+    assert "mirror" not in captured["HDMI-A-1"]
+
+
+# --------------------------------------------------------------------------
+# status: "on screen" is what Hyprland applied, not what would be chosen now
+# --------------------------------------------------------------------------
+
+def _status(mp, monkeypatch, capsys):
+    monkeypatch.setattr(mp, "connected_outputs", lambda: ["eDP-1", "DP-1"])
+    assert mp.cmd_status(None) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def _two_profiles(mp):
+    mp.save(mp.sanitize({"profiles": [
+        {"id": "laptop", "match": ["eDP-1"], "monitors": []},
+        {"id": "desk", "match": ["eDP-1", "DP-1"], "monitors": []},
+    ], "hotplug": False}))
+
+
+def test_status_reports_what_was_applied(mp, monkeypatch, capsys):
+    """Issue #9: with hotplug off the dock is plugged in, auto would pick the
+    desk, but Hyprland still shows the laptop profile."""
+    _two_profiles(mp)
+    with open(mp.APPLIED_PATH, "w") as handle:
+        handle.write("laptop\n")
+    payload = _status(mp, monkeypatch, capsys)
+    assert payload["appliedId"] == "laptop"
+    assert payload["autoId"] == "desk"
+    assert payload["effectiveId"] == "desk"
+
+
+def test_status_reports_nothing_applied_before_the_first_parse(mp, monkeypatch, capsys):
+    _two_profiles(mp)
+    payload = _status(mp, monkeypatch, capsys)
+    assert payload["appliedId"] == ""
