@@ -392,28 +392,32 @@ Panel {
                     font.pixelSize: Style.font.body
                   }
 
-                  TextField {
-                    id: nameField
-                    visible: row.isNew && root.creating
+                  // Only created while a name is being typed. An editable
+                  // field that merely sits hidden still makes Qt read every
+                  // clipboard change, which a hostile clipboard owner could
+                  // use to stall the shell.
+                  Loader {
+                    active: row.isNew && root.creating
                     width: parent.width
-                    placeholderText: "Name this setup, then Return"
-                    foreground: root.foreground
-                    font.family: root.fontFamily
 
-                    onVisibleChanged: {
-                      if (!visible) return
-                      text = ""
-                      Qt.callLater(function() { nameField.forceActiveFocus() })
-                    }
+                    sourceComponent: TextField {
+                      id: nameField
+                      width: parent ? parent.width : 0
+                      placeholderText: "Name this setup, then Return"
+                      foreground: root.foreground
+                      font.family: root.fontFamily
 
-                    Keys.onPressed: function(event) {
-                      if (event.key === Qt.Key_Escape) {
-                        root.cancelCreating()
-                        event.accepted = true
-                      } else if (event.key === Qt.Key_Return
-                                 || event.key === Qt.Key_Enter) {
-                        root.commitCreate(nameField.text)
-                        event.accepted = true
+                      Component.onCompleted: Qt.callLater(function() { nameField.forceActiveFocus() })
+
+                      Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_Escape) {
+                          root.cancelCreating()
+                          event.accepted = true
+                        } else if (event.key === Qt.Key_Return
+                                   || event.key === Qt.Key_Enter) {
+                          root.commitCreate(nameField.text)
+                          event.accepted = true
+                        }
                       }
                     }
                   }
