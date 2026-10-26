@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -33,8 +34,12 @@ BACKUP_DIR = os.path.join(CONFIG_DIR, "backups")
 # Which profile the running Hyprland actually has applied, plus the lock and
 # trace that go with `sync`. Runtime state, not config: it must not survive a
 # reboot, because after one nothing is applied yet.
-RUNTIME_DIR = os.path.join(
-    os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), "monitor-profiles")
+# Without XDG_RUNTIME_DIR the fallback lives in the shared temp dir, so it gets
+# a per-user name and is only used if it is a private directory we own.
+RUNTIME_DIR = (
+    os.path.join(os.environ["XDG_RUNTIME_DIR"], "monitor-profiles")
+    if os.environ.get("XDG_RUNTIME_DIR")
+    else os.path.join(tempfile.gettempdir(), "monitor-profiles-%d" % os.getuid()))
 APPLIED_PATH = os.path.join(RUNTIME_DIR, "applied")
 LOCK_PATH = os.path.join(RUNTIME_DIR, "sync.lock")
 TRACE_PATH = os.path.join(RUNTIME_DIR, "sync.log")
@@ -230,11 +235,32 @@ def backup():
 
 # ------------------------------------------------------------------ resolution
 
+def runtime_dir_ready():
+    """Create RUNTIME_DIR, and refuse one another user could plant links in.
+
+    A directory that is a symlink, owned by someone else or writable by group
+    or others is not ours to write into, whoever created it first.
+    """
+    try:
+        os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
+        info = os.lstat(RUNTIME_DIR)
+    except OSError:
+        return False
+    return (stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+            and not info.st_mode & 0o022)
+
+
+def open_runtime(path, flags):
+    """Open a file in RUNTIME_DIR without following a symlink planted there."""
+    return os.open(path, flags | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+
+
 def write_runtime(path, text):
     """Best effort: a runtime note is never worth failing a command over."""
+    if not runtime_dir_ready():
+        return
     try:
-        os.makedirs(RUNTIME_DIR, exist_ok=True)
-        with open(path, "w") as handle:
+        with os.fdopen(open_runtime(path, os.O_WRONLY | os.O_TRUNC), "w") as handle:
             handle.write(text)
     except OSError:
         pass
@@ -510,9 +536,10 @@ def cmd_sync(args):
     to settle -- otherwise a two-monitor dock would order two reloads, and the
     second would land while the first was still being parsed.
     """
+    if not runtime_dir_ready():
+        return 0
     try:
-        os.makedirs(RUNTIME_DIR, exist_ok=True)
-        lock = open(LOCK_PATH, "w")
+        lock = os.fdopen(open_runtime(LOCK_PATH, os.O_WRONLY), "w")
     except OSError:
         return 0
 

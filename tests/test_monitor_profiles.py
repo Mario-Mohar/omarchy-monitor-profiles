@@ -352,3 +352,55 @@ def test_status_reports_nothing_applied_before_the_first_parse(mp, monkeypatch, 
     _two_profiles(mp)
     payload = _status(mp, monkeypatch, capsys)
     assert payload["appliedId"] == ""
+
+
+# -------------------------------------------------------------- runtime dir
+
+
+def _point_runtime_at(mp, monkeypatch, path):
+    monkeypatch.setattr(mp, "RUNTIME_DIR", str(path))
+    monkeypatch.setattr(mp, "APPLIED_PATH", str(path / "applied"))
+    monkeypatch.setattr(mp, "LOCK_PATH", str(path / "sync.lock"))
+    monkeypatch.setattr(mp, "TRACE_PATH", str(path / "sync.log"))
+
+
+def test_runtime_files_do_not_follow_a_planted_symlink(mp, tmp_path, monkeypatch):
+    victim = tmp_path / "victim.conf"
+    victim.write_text("keep me\n")
+    run = tmp_path / "run"
+    _point_runtime_at(mp, monkeypatch, run)
+    (run / "sync.lock").symlink_to(victim)
+    (run / "applied").symlink_to(victim)
+
+    assert mp.cmd_sync(type("Args", (), {"delay": 0})()) == 0
+    mp.write_runtime(mp.APPLIED_PATH, "home\n")
+    assert victim.read_text() == "keep me\n"
+
+
+def test_a_runtime_dir_others_can_write_is_refused(mp, tmp_path, monkeypatch):
+    run = tmp_path / "shared"
+    run.mkdir()
+    run.chmod(0o777)
+    _point_runtime_at(mp, monkeypatch, run)
+
+    assert not mp.runtime_dir_ready()
+    mp.write_runtime(mp.APPLIED_PATH, "home\n")
+    assert not (run / "applied").exists()
+
+
+def test_a_symlinked_runtime_dir_is_refused(mp, tmp_path, monkeypatch):
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    _point_runtime_at(mp, monkeypatch, link)
+
+    assert not mp.runtime_dir_ready()
+
+
+def test_a_fresh_runtime_dir_is_private(mp, tmp_path, monkeypatch):
+    run = tmp_path / "fresh"
+    _point_runtime_at(mp, monkeypatch, run)
+
+    assert mp.runtime_dir_ready()
+    assert run.stat().st_mode & 0o077 == 0
