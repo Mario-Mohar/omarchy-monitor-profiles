@@ -404,3 +404,55 @@ def test_a_fresh_runtime_dir_is_private(mp, tmp_path, monkeypatch):
 
     assert mp.runtime_dir_ready()
     assert run.stat().st_mode & 0o077 == 0
+
+
+def test_read_applied_returns_what_sync_wrote(mp, tmp_path, monkeypatch):
+    _point_runtime_at(mp, monkeypatch, tmp_path / "run")
+    mp.write_runtime(mp.APPLIED_PATH, "desk\n")
+    assert mp.read_applied() == "desk"
+
+
+def test_read_applied_refuses_a_shared_runtime_dir(mp, tmp_path, monkeypatch):
+    run = tmp_path / "shared"
+    run.mkdir()
+    (run / "applied").write_text("desk\n")
+    run.chmod(0o777)
+    _point_runtime_at(mp, monkeypatch, run)
+
+    assert mp.read_applied() is None
+
+
+def test_read_applied_does_not_follow_a_symlink(mp, tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    _point_runtime_at(mp, monkeypatch, run)
+    (run / "applied").symlink_to("/dev/zero")
+
+    assert mp.read_applied() is None
+
+
+def test_read_applied_does_not_block_on_a_fifo(mp, tmp_path, monkeypatch):
+    import time
+
+    run = tmp_path / "run"
+    _point_runtime_at(mp, monkeypatch, run)
+    os.mkfifo(run / "applied")
+
+    started = time.monotonic()
+    assert mp.read_applied() is None
+    assert time.monotonic() - started < 2
+
+
+def test_read_applied_bounds_the_read(mp, tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    _point_runtime_at(mp, monkeypatch, run)
+    (run / "applied").write_text("a" * 10000)
+
+    assert mp.read_applied() is None
+
+
+def test_read_applied_rejects_a_malformed_id(mp, tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    _point_runtime_at(mp, monkeypatch, run)
+    (run / "applied").write_text("../etc\n")
+
+    assert mp.read_applied() is None
