@@ -251,8 +251,17 @@ def runtime_dir_ready():
 
 
 def open_runtime(path, flags):
-    """Open a file in RUNTIME_DIR without following a symlink planted there."""
-    return os.open(path, flags | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    """Open a file in RUNTIME_DIR without following a symlink planted there.
+
+    O_NONBLOCK keeps a FIFO from stalling the open; what was opened is then
+    checked to be a regular file of ours before anything is read or written.
+    """
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        os.close(fd)
+        raise OSError(errno.EPERM, "not a regular file of ours", path)
+    return fd
 
 
 def write_runtime(path, text):
@@ -260,18 +269,39 @@ def write_runtime(path, text):
     if not runtime_dir_ready():
         return
     try:
-        with os.fdopen(open_runtime(path, os.O_WRONLY | os.O_TRUNC), "w") as handle:
+        with os.fdopen(open_runtime(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC),
+                       "w") as handle:
             handle.write(text)
     except OSError:
         pass
 
 
+# The applied file holds one profile id and a newline, so this is plenty.
+MAX_APPLIED_BYTES = 64
+
+
 def read_applied():
+    """The id the last sync applied, "" for none, None if unknown.
+
+    Reads go through the same checks as writes: a directory or file another
+    user could have planted is not read, and never more than one short line.
+    """
+    if not runtime_dir_ready():
+        return None
     try:
-        with open(APPLIED_PATH, "r") as handle:
-            return handle.readline().strip()
+        fd = open_runtime(APPLIED_PATH, os.O_RDONLY)
     except OSError:
         return None
+    try:
+        raw = os.read(fd, MAX_APPLIED_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_APPLIED_BYTES:
+        return None
+    line = raw.decode("ascii", "replace").split("\n", 1)[0].strip()
+    return line if line == "" or ID_RE.match(line) else None
 
 
 def profile_by_id(config, pid):
@@ -539,7 +569,7 @@ def cmd_sync(args):
     if not runtime_dir_ready():
         return 0
     try:
-        lock = os.fdopen(open_runtime(LOCK_PATH, os.O_WRONLY), "w")
+        lock = os.fdopen(open_runtime(LOCK_PATH, os.O_WRONLY | os.O_CREAT), "w")
     except OSError:
         return 0
 
