@@ -71,6 +71,11 @@ four-screen desk wins over a two-screen home setup, which wins over the laptop
 on its own — regardless of the order they are saved in. A setup with no
 required outputs matches everything and is the last resort.
 
+Two screens that use the same port, say a portable monitor and the big one at
+home both on `HDMI-A-1`, look the same by output alone. Give one setup a
+`screens` entry naming the screen it expects there, and Auto prefers it while
+that screen is plugged in and falls back to the plain setup otherwise.
+
 Outputs a setup switches *off* are not counted as required. A laptop-only setup
 that disables the external monitor does not start demanding that monitor.
 
@@ -161,7 +166,9 @@ last one on purpose.
 mean exactly what they mean in
 [Hyprland's monitor config](https://wiki.hypr.land/Configuring/Monitors/).
 `match` is the list of outputs Auto requires — `capture` fills it in, and you
-can narrow it by hand. `hotplug` is the automatic reload described above; it
+can narrow it by hand. `screens` is optional and maps an output to part of the
+screen's name, as `hyprctl monitors` prints it in `description` (make, model,
+serial), for example `{ "HDMI-A-1": "ARZOPA" }`; case does not matter. `hotplug` is the automatic reload described above; it
 defaults to on.
 
 Anything malformed is dropped rather than passed to Hyprland, and a file that
