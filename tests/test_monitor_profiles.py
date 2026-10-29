@@ -193,6 +193,71 @@ def test_auto_pick_is_none_when_nothing_fits(mp):
     assert mp.auto_pick(config, ["eDP-1"]) is None
 
 
+# --------------------------------------------------------------------------
+# screens: two monitors on the same port
+# --------------------------------------------------------------------------
+
+SHARED_PORT = [
+    {"id": "home", "match": ["eDP-1", "HDMI-A-1"]},
+    {"id": "portable", "match": ["eDP-1", "HDMI-A-1"],
+     "screens": {"HDMI-A-1": "arzopa"}},
+]
+
+
+def test_a_named_screen_wins_over_the_bare_port(mp):
+    config = config_with(mp, SHARED_PORT)
+    names = {"HDMI-A-1": "GWD ARZOPA 0000001390037"}
+    assert mp.auto_pick(config, ["eDP-1", "HDMI-A-1"], names)["id"] == "portable"
+
+
+def test_a_different_screen_on_the_port_falls_back_to_the_bare_port(mp):
+    config = config_with(mp, SHARED_PORT)
+    names = {"HDMI-A-1": "LG Electronics LG ULTRAWIDE 123"}
+    assert mp.auto_pick(config, ["eDP-1", "HDMI-A-1"], names)["id"] == "home"
+
+
+def test_an_unreadable_edid_does_not_satisfy_a_named_screen(mp):
+    config = config_with(mp, SHARED_PORT)
+    assert mp.auto_pick(config, ["eDP-1", "HDMI-A-1"])["id"] == "home"
+
+
+def test_more_outputs_still_beat_a_named_screen(mp):
+    config = config_with(mp, [
+        {"id": "portable", "match": ["eDP-1"], "screens": {"eDP-1": "AUO"}},
+        {"id": "desk", "match": ["eDP-1", "DP-1"]},
+    ])
+    assert mp.auto_pick(config, ["eDP-1", "DP-1"], {"eDP-1": "AUO"})["id"] == "desk"
+
+
+def test_malformed_screens_are_dropped(mp):
+    config = config_with(mp, [
+        {"id": "a", "screens": {"HDMI-A-1": "ARZOPA", "bad port": "x", "DP-1": 3, "DP-2": " "}},
+        {"id": "b", "screens": ["HDMI-A-1"]},
+    ])
+    assert config["profiles"][0]["screens"] == {"HDMI-A-1": "ARZOPA"}
+    assert "screens" not in config["profiles"][1]
+
+
+def edid(make, model, serial):
+    code = sum((ord(c) - 64) << shift for c, shift in zip(make, (10, 5, 0), strict=True))
+    data = bytearray(128)
+    data[:8] = b"\x00\xff\xff\xff\xff\xff\xff\x00"
+    data[8], data[9] = code >> 8, code & 0xFF
+    for start, tag, text in ((54, 0xFC, model), (72, 0xFF, serial)):
+        data[start + 3] = tag
+        data[start + 5:start + 18] = (text + "\n").ljust(13).encode()[:13]
+    return bytes(data)
+
+
+def test_edid_name_reads_make_model_and_serial(mp):
+    assert mp.edid_name(edid("GWD", "ARZOPA", "0000001390037")) == "GWD ARZOPA 0000001390037"
+
+
+def test_edid_name_rejects_garbage(mp):
+    assert mp.edid_name(b"") == ""
+    assert mp.edid_name(bytes(128)) == ""
+
+
 def test_effective_honours_an_explicitly_chosen_profile(mp):
     config = mp.sanitize({
         "profiles": [{"id": "desk", "match": ["DP-1"]}, {"id": "laptop", "match": []}],

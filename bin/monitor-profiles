@@ -88,6 +88,44 @@ def connected_outputs():
     return sorted(found)
 
 
+def screen_names(outputs=None):
+    """What is plugged into each output, as "make model serial" from its EDID.
+
+    The same spelling Hyprland uses for a monitor's description, so a name
+    copied from `hyprctl monitors` matches. Read from sysfs for the same reason
+    as connected_outputs(). Outputs without a readable EDID are left out.
+    """
+    names = {}
+    for path in glob("/sys/class/drm/card*-*/edid"):
+        output = os.path.basename(os.path.dirname(path)).split("-", 1)[-1]
+        if outputs is not None and output not in outputs:
+            continue
+        try:
+            with open(path, "rb") as handle:
+                edid = handle.read(128)
+        except OSError:
+            continue
+        name = edid_name(edid)
+        if name:
+            names[output] = name
+    return names
+
+
+def edid_name(edid):
+    if len(edid) < 128 or edid[:8] != b"\x00\xff\xff\xff\xff\xff\xff\x00":
+        return ""
+    code = (edid[8] << 8) | edid[9]
+    make = "".join(chr(((code >> shift) & 31) + 64) for shift in (10, 5, 0))
+    parts = {}
+    # Four 18-byte descriptors; 0xfc carries the model name, 0xff the serial.
+    for start in range(54, 126, 18):
+        block = edid[start:start + 18]
+        if block[0] == 0 and block[1] == 0 and block[3] in (0xFC, 0xFF):
+            text = block[5:].split(b"\n", 1)[0].decode("ascii", "replace").strip()
+            parts[block[3]] = text
+    return " ".join(p for p in (make, parts.get(0xFC, ""), parts.get(0xFF, "")) if p)
+
+
 def hypr_monitors():
     """Current arrangement according to the running compositor, or None."""
     if not shutil.which("hyprctl"):
@@ -141,6 +179,9 @@ def sanitize(raw):
                       if isinstance(o, str) and OUTPUT_RE.match(o)][:MAX_MONITORS],
             "monitors": sanitize_monitors(entry.get("monitors")),
         })
+        screens = sanitize_screens(entry.get("screens"))
+        if screens:
+            profiles[-1]["screens"] = screens
 
     raw_profiles = raw.get("profiles")
     if profiles:
@@ -156,6 +197,16 @@ def sanitize(raw):
     config["active"] = active if active == AUTO or active in seen else AUTO
     config["hotplug"] = raw.get("hotplug", True) is not False
     return config
+
+
+def sanitize_screens(raw):
+    """Output -> part of the screen's name that has to be plugged in there."""
+    if not isinstance(raw, dict):
+        return {}
+    return {output: str(name).strip()[:MAX_NAME]
+            for output, name in list(raw.items())[:MAX_MONITORS]
+            if isinstance(output, str) and OUTPUT_RE.match(output)
+            and isinstance(name, str) and name.strip()}
 
 
 def sanitize_monitors(raw):
@@ -311,27 +362,46 @@ def profile_by_id(config, pid):
     return None
 
 
-def auto_pick(config, connected):
+def fits(profile, connected, names):
+    """Every required output is plugged in, and holds the screen it names.
+
+    `screens` tells two monitors apart that share a port, like a portable
+    screen and the big one at home both on HDMI-A-1. The name only has to
+    appear somewhere in the screen's "make model serial", ignoring case.
+    """
+    if not all(output in connected for output in profile["match"]):
+        return False
+    return all(want.lower() in names.get(output, "").lower()
+               for output, want in profile.get("screens", {}).items())
+
+
+def auto_pick(config, connected, names=None):
     """The most specific profile whose every required output is plugged in.
 
     Most specific wins so the desk (four screens) beats the two-screen home
     setup, which in turn beats the laptop on its own -- without depending on the
-    order somebody happened to save them in. A profile with an empty `match`
-    matches everything and is therefore the last resort.
+    order somebody happened to save them in. Between equal outputs, the one that
+    also names its screens wins. A profile with an empty `match` matches
+    everything and is therefore the last resort.
     """
+    names = names or {}
     best = None
     for profile in config["profiles"]:
-        required = profile["match"]
-        if not all(output in connected for output in required):
+        if not fits(profile, connected, names):
             continue
-        if best is None or len(required) > len(best["match"]):
-            best = profile
+        rank = (len(profile["match"]), len(profile.get("screens", {})))
+        if best is None or rank > best_rank:
+            best, best_rank = profile, rank
     return best
 
 
-def effective(config, connected=None):
+def effective(config, connected=None, names=None):
     if config["active"] == AUTO:
-        return auto_pick(config, connected if connected is not None else connected_outputs())
+        if connected is None:
+            connected = connected_outputs()
+        if names is None:
+            names = screen_names(connected)
+        return auto_pick(config, connected, names)
     return profile_by_id(config, config["active"])
 
 
@@ -349,8 +419,9 @@ def cmd_init(args):
 def cmd_status(args):
     config = load()
     connected = connected_outputs()
-    chosen = effective(config, connected)
-    auto = auto_pick(config, connected)
+    names = screen_names(connected)
+    chosen = effective(config, connected, names)
+    auto = auto_pick(config, connected, names)
     payload = {
         "configPath": CONFIG_PATH,
         # Reported rather than repeated in QML: the panel hides its "New setup"
@@ -365,7 +436,8 @@ def cmd_status(args):
         # and the reload, and only this one is actually on screen.
         "appliedId": read_applied() or "",
         "connected": connected,
-        "profiles": [dict(p, matches=all(o in connected for o in p["match"]),
+        "screens": names,
+        "profiles": [dict(p, matches=fits(p, connected, names),
                           configured=bool(p["monitors"]))
                      for p in config["profiles"]],
     }
