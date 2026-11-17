@@ -392,32 +392,76 @@ Panel {
                     font.pixelSize: Style.font.body
                   }
 
-                  // Only created while a name is being typed. An editable
-                  // field that merely sits hidden still makes Qt read every
-                  // clipboard change, which a hostile clipboard owner could
-                  // use to stall the shell.
+                  // The name is typed into a plain Text, not a TextField. Any
+                  // native Qt text input reads the clipboard to know whether
+                  // paste is possible, and a hostile clipboard owner could use
+                  // that to stall the shell. Without one nothing here ever
+                  // touches the clipboard. Only created while a name is typed.
                   Loader {
                     active: row.isNew && root.creating
                     width: parent.width
 
-                    sourceComponent: TextField {
-                      id: nameField
+                    sourceComponent: Item {
+                      id: nameEntry
                       width: parent ? parent.width : 0
-                      placeholderText: "Name this setup, then Return"
-                      foreground: root.foreground
-                      font.family: root.fontFamily
+                      implicitHeight: nameText.implicitHeight
+                      focus: true
 
-                      Component.onCompleted: Qt.callLater(function() { nameField.forceActiveFocus() })
+                      property string typed: ""
+                      readonly property int maxLength: 40
+
+                      Component.onCompleted: Qt.callLater(function() { nameEntry.forceActiveFocus() })
+
+                      Text {
+                        id: nameText
+                        textFormat: Text.PlainText
+                        width: Math.min(implicitWidth, parent.width - caret.width)
+                        elide: Text.ElideLeft
+                        text: nameEntry.typed !== "" ? nameEntry.typed
+                          : "Name this setup, then Return"
+                        color: root.foreground
+                        opacity: nameEntry.typed !== "" ? 1 : 0.55
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                      }
+
+                      Rectangle {
+                        id: caret
+                        x: nameEntry.typed !== "" ? nameText.width + 1 : 0
+                        anchors.verticalCenter: nameText.verticalCenter
+                        width: 2
+                        height: nameText.font.pixelSize + 2
+                        color: root.foreground
+                        visible: nameEntry.activeFocus
+
+                        SequentialAnimation on opacity {
+                          running: caret.visible
+                          loops: Animation.Infinite
+                          NumberAnimation { to: 0; duration: 500 }
+                          NumberAnimation { to: 1; duration: 500 }
+                        }
+                      }
 
                       Keys.onPressed: function(event) {
                         if (event.key === Qt.Key_Escape) {
                           root.cancelCreating()
-                          event.accepted = true
                         } else if (event.key === Qt.Key_Return
                                    || event.key === Qt.Key_Enter) {
-                          root.commitCreate(nameField.text)
-                          event.accepted = true
+                          root.commitCreate(nameEntry.typed)
+                        } else if (event.key === Qt.Key_Backspace) {
+                          nameEntry.typed = nameEntry.typed.slice(0, -1)
+                        } else if (event.text !== ""
+                                   && !(event.modifiers & (Qt.ControlModifier
+                                                           | Qt.AltModifier
+                                                           | Qt.MetaModifier))
+                                   && event.text.charCodeAt(0) >= 32
+                                   && event.text.charCodeAt(0) !== 127) {
+                          if (nameEntry.typed.length < nameEntry.maxLength)
+                            nameEntry.typed += event.text
+                        } else {
+                          return
                         }
+                        event.accepted = true
                       }
                     }
                   }
