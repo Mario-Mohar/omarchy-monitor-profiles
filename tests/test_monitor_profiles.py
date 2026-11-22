@@ -521,3 +521,16 @@ def test_read_applied_rejects_a_malformed_id(mp, tmp_path, monkeypatch):
     (run / "applied").write_text("../etc\n")
 
     assert mp.read_applied() is None
+
+
+def test_duplicate_copies_the_arrangement(mp, capsys):
+    import argparse
+    config = mp.load()
+    config["profiles"][0]["monitors"] = [{"output": "DP-1", "mode": "2560x1440@60"}]
+    mp.save(config)
+
+    src = config["profiles"][0]["id"]
+    assert mp.cmd_duplicate(argparse.Namespace(profile=src, name="Desk copy")) == 0
+    copy = mp.profile_by_id(mp.load(), "desk-copy")
+    assert copy["name"] == "Desk copy"
+    assert copy["monitors"][0]["output"] == "DP-1"

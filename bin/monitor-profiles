@@ -599,6 +599,27 @@ def cmd_remove(args):
     return reload_hyprland() if switched else 0
 
 
+def cmd_duplicate(args):
+    """Copy a profile under a new name, arrangement included."""
+    config = load()
+    src = profile_by_id(config, str(args.profile or "").strip())
+    if src is None:
+        print("no such profile: %s" % args.profile, file=sys.stderr)
+        return 2
+
+    taken = set(p["id"] for p in config["profiles"])
+    name = str(args.name or "").strip()[:MAX_NAME] or src["name"] + " copy"
+    pid = derive_id(name, taken)
+
+    copy = dict(src)
+    copy.update({"id": pid, "name": name})
+    config["profiles"].append(copy)
+    save(config)
+    json.dump({"id": pid, "name": name}, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
 def cmd_emit(args):
     """One line per monitor for lua/profiles.lua.
 
@@ -729,6 +750,11 @@ def main():
     add.add_argument("--name", default="", help="display name")
     add.add_argument("--icon", default="", help="glyph shown in the panel row")
     add.set_defaults(func=cmd_add)
+
+    duplicate = sub.add_parser("duplicate", help="copy a profile, arrangement included")
+    duplicate.add_argument("profile")
+    duplicate.add_argument("--name", default="", help="name of the copy")
+    duplicate.set_defaults(func=cmd_duplicate)
 
     remove = sub.add_parser("remove", help="delete a profile")
     remove.add_argument("profile")
